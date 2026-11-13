@@ -2,6 +2,8 @@ import { openDB } from 'idb'
 import { isSupabaseConfigured, supabase } from './supabase'
 
 export const stores = ['opportunities', 'ideas', 'evaluations', 'projects', 'research', 'knowledge']
+export const ATTACHMENT_BUCKET = 'nexus-attachments'
+export const MAX_ATTACHMENT_SIZE = 50 * 1024 * 1024
 const LEGACY_DB_NAME = 'nexus-sindpetshop'
 const LEGACY_DB_VERSION = 1
 
@@ -42,6 +44,55 @@ export async function remove(entity, id) {
   const client = requireSupabase()
   const { error } = await client.from('nexus_records').delete().eq('id', id).eq('entity', entity)
   if (error) throw error
+}
+
+export async function uploadAttachments(entity, recordId, files) {
+  const client = requireSupabase()
+  const userId = await currentUserId(client)
+  const bucket = client.storage.from(ATTACHMENT_BUCKET)
+  const uploaded = []
+
+  try {
+    for (const file of files) {
+      if (file.size > MAX_ATTACHMENT_SIZE) {
+        throw new Error(`“${file.name}” excede o limite de 50 MB.`)
+      }
+      const safeName = file.name.replace(/[^\p{L}\p{N}._() -]/gu, '_').slice(-120) || 'arquivo'
+      const path = `${entity}/${recordId}/${crypto.randomUUID()}-${safeName}`
+      const { error } = await bucket.upload(path, file, {
+        cacheControl: '300',
+        contentType: file.type || 'application/octet-stream',
+        upsert: false,
+      })
+      if (error) throw error
+      uploaded.push({
+        id: crypto.randomUUID(),
+        name: file.name,
+        path,
+        type: file.type || 'application/octet-stream',
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+      })
+    }
+    return uploaded
+  } catch (error) {
+    if (uploaded.length) await bucket.remove(uploaded.map(file => file.path)).catch(() => {})
+    throw error
+  }
+}
+
+export async function removeAttachments(attachments = []) {
+  if (!attachments.length) return
+  const client = requireSupabase()
+  const { error } = await client.storage.from(ATTACHMENT_BUCKET).remove(attachments.map(file => file.path))
+  if (error) throw error
+}
+
+export async function attachmentUrl(path, download = false) {
+  const client = requireSupabase()
+  const { data, error } = await client.storage.from(ATTACHMENT_BUCKET).createSignedUrl(path, 900, { download })
+  if (error) throw error
+  return data.signedUrl
 }
 
 export async function clearAll() {

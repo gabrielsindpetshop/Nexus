@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from 'react'
-import { Activity, Archive, ArrowDownToLine, ArrowRight, ArrowUpFromLine, BookOpen, BriefcaseBusiness, Check, ChevronDown, CircleHelp, ClipboardList, Copy, FileSearch, FlaskConical, FolderKanban, Gauge, Lightbulb, Menu, Plus, Search, Settings, Sparkles, Trash2, X } from 'lucide-react'
-import { all, clearAll, exportAll, importAll, importLegacyLocal, put, remove, storageInfo, stores } from './db'
+import { Activity, Archive, ArrowDownToLine, ArrowRight, ArrowUpFromLine, BookOpen, BriefcaseBusiness, Check, ChevronDown, CircleHelp, ClipboardList, Copy, Download, Eye, File, FileSearch, FlaskConical, FolderKanban, Gauge, Lightbulb, Menu, Paperclip, Plus, Search, Settings, Sparkles, Trash2, Upload, X } from 'lucide-react'
+import { all, attachmentUrl, clearAll, exportAll, importAll, importLegacyLocal, MAX_ATTACHMENT_SIZE, put, remove, removeAttachments, storageInfo, stores, uploadAttachments } from './db'
 import AuthGate from './AuthGate'
 
 const categories = ['Relações de trabalho', 'Direito sindical', 'Setor pet', 'Comunicação', 'Marketing', 'Tecnologia', 'Relacionamento empresarial', 'Formação profissional', 'Parcerias', 'Representatividade', 'Gestão institucional', 'Outros']
@@ -29,6 +29,7 @@ function Workspace({user,onSignOut}) {
   const [data,setData] = useState(Object.fromEntries(stores.map(s=>[s,[]])))
   const [page,setPage] = useState('dashboard')
   const [editing,setEditing] = useState(null)
+  const [viewing,setViewing] = useState(null)
   const [query,setQuery] = useState('')
   const [modal,setModal] = useState(false)
   const [notice,setNotice] = useState('')
@@ -50,20 +51,31 @@ function Workspace({user,onSignOut}) {
   const records = config[page] ? data[page] : []
   const visible = useMemo(()=>records.filter(row=>JSON.stringify(row).toLowerCase().includes(query.toLowerCase())),[records,query])
 
-  async function saveRecord(store, record) {
+  async function saveRecord(store, record, pendingFiles=[], removedFiles=[]) {
     const saved = {...record, id:record.id||uid(), updatedAt:new Date().toISOString(), createdAt:record.createdAt||new Date().toISOString()}
-    await put(store,saved); await refresh(); setModal(false); setEditing(null); toast('Registro salvo.')
+    let uploaded=[]
+    try {
+      uploaded=await uploadAttachments(store,saved.id,pendingFiles)
+      const removedPaths=new Set(removedFiles.map(file=>file.path))
+      saved.attachments=[...(record.attachments||[]).filter(file=>!removedPaths.has(file.path)),...uploaded]
+      await put(store,saved)
+      if(removedFiles.length) await removeAttachments(removedFiles).catch(()=>toast('Registro salvo; um anexo removido não pôde ser apagado do armazenamento.'))
+      await refresh(); setModal(false); setEditing(null); setViewing(null); toast('Registro salvo.')
+    } catch(error) {
+      if(uploaded.length) await removeAttachments(uploaded).catch(()=>{})
+      throw error
+    }
   }
   async function deleteRecord(store,row) {
     if (!window.confirm(`Excluir “${row.title}”? Essa ação não pode ser desfeita.`)) return
-    await remove(store,row.id); await refresh(); toast('Registro excluído.')
+    await removeAttachments(row.attachments||[]); await remove(store,row.id); await refresh(); toast('Registro excluído.')
   }
   function openNew(store=page, seed={}) {
     const fields=config[store]?.fields || []
-    setEditing({...blank(fields), ...seed, id:seed.id||''}); setModal(true)
+    setViewing(null); setEditing({...blank(fields), ...seed, attachments:seed.attachments||[], id:seed.id||uid()}); setModal(true)
   }
-  function openEdit(store,row) { setEditing({...row}); setModal(true) }
-  async function duplicateIdea(row) { await saveRecord('ideas',{...row,id:'',title:row.title+' (cópia)',status:'Nova',createdAt:'',updatedAt:''}) }
+  function openEdit(store,row) { setViewing(null); setEditing({...row}); setModal(true) }
+  async function duplicateIdea(row) { await saveRecord('ideas',{...row,id:'',attachments:[],title:row.title+' (cópia)',status:'Nova',createdAt:'',updatedAt:''}) }
   async function convertOpportunity(row) {
     const exists=data.ideas.some(x=>x.sourceOpportunity===row.id)
     if (exists) return toast('Esta oportunidade já foi convertida em ideia.')
@@ -112,14 +124,15 @@ function Workspace({user,onSignOut}) {
       <header className="topbar"><button className="mobile-menu icon-button" onClick={()=>setMobileMenu(true)} aria-label="Abrir menu"><Menu size={20}/></button><div className="breadcrumbs">SindPetshop-SP <span>/</span> <b>{current?.[1]}</b></div><div className="top-actions"><span className="local-badge"><span/> Supabase conectado</span><span className="account-email" title={user.email}>{user.email}</span><button className="secondary-button signout-button" onClick={onSignOut}>Sair</button></div></header>
       <div className="page-content">
         {page==='dashboard'&&<Dashboard data={data} go={setPage}/>}
-        {config[page]&&<RecordList key={page} config={config[page]} rows={visible} query={query} setQuery={setQuery} onNew={()=>openNew()} onEdit={row=>openEdit(page,row)} onDelete={row=>deleteRecord(page,row)} onConvert={page==='opportunities'?convertOpportunity:page==='ideas'?convertIdea:null} onDuplicate={page==='ideas'?duplicateIdea:null} />}
+        {config[page]&&<RecordList key={page} config={config[page]} rows={visible} query={query} setQuery={setQuery} onNew={()=>openNew()} onView={setViewing} onEdit={row=>openEdit(page,row)} onDelete={row=>deleteRecord(page,row)} onConvert={page==='opportunities'?convertOpportunity:page==='ideas'?convertIdea:null} onDuplicate={page==='ideas'?duplicateIdea:null} />}
         {page==='lab'&&<Lab promptIdea={promptIdea} setPromptIdea={setPromptIdea} makePrompt={makePrompt} prompt={prompt} aiReply={aiReply} setAiReply={setAiReply} saveReply={saveReplyAsIdea}/>}
         {page==='evaluation'&&<Evaluation ideas={data.ideas} evaluations={data.evaluations} selected={evalIdea} setSelected={setEvalIdea} onSave={saveEvaluation}/>}
         {page==='settings'&&<SettingsPage storage={storage} data={data} onExport={exportJSON} onImport={importJSON} onCSV={exportCSV} onMigrate={migrateLegacy} onClear={async()=>{if(window.confirm('Excluir todos os registros do NEXUS no espaço compartilhado do Supabase?')){if(window.confirm('Confirmação final: essa ação remove os dados para todos os membros e não pode ser desfeita.')){try{await clearAll();await refresh();toast('Dados removidos.')}catch(e){toast(e.message||'Não foi possível limpar os dados.')}}}}}/>}
       </div>
       <footer>Uma ferramenta complementar para organizar oportunidades e iniciativas institucionais.</footer>
     </main>
-    {modal&&config[page]&&<RecordModal config={config[page]} record={editing} onClose={()=>{setModal(false);setEditing(null)}} onSave={row=>saveRecord(page,row)}/>}
+    {viewing&&config[page]&&<RecordDetails config={config[page]} record={viewing} onClose={()=>setViewing(null)} onEdit={()=>openEdit(page,viewing)} />}
+    {modal&&config[page]&&<RecordModal config={config[page]} record={editing} onClose={()=>{setModal(false);setEditing(null)}} onSave={(row,files,removed)=>saveRecord(page,row,files,removed)}/>}
     {notice&&<div className="toast"><Check size={16}/>{notice}</div>}
   </div>
 }
@@ -146,19 +159,47 @@ function Dashboard({data,go}) {
 }
 
 function Empty({icon:Icon,title,text,action,onAction}){return <div className="empty"><div className="empty-icon"><Icon size={22}/></div><strong>{title}</strong><p>{text}</p>{action&&<button className="text-button" onClick={onAction}>{action} <ArrowRight size={14}/></button>}</div>}
-function RecordList({config:cfg,rows,query,setQuery,onNew,onEdit,onDelete,onConvert,onDuplicate}) {
+function RecordList({config:cfg,rows,query,setQuery,onNew,onView,onEdit,onDelete,onConvert,onDuplicate}) {
  const Icon=cfg.icon
  return <><div className="page-heading"><div><div className="eyebrow">GESTÃO DE INICIATIVAS</div><h1>{cfg.title}</h1><p>{cfg.description}</p></div><button className="primary-button" onClick={onNew}><Plus size={17}/> Nova {cfg.singular}</button></div>
  <section className="panel table-panel"><div className="list-toolbar"><div className="search-box"><Search size={17}/><input value={query} onChange={e=>setQuery(e.target.value)} placeholder={`Buscar ${cfg.title.toLowerCase()}...`}/>{query&&<button onClick={()=>setQuery('')}><X size={15}/></button>}</div><div className="result-count">{rows.length} {rows.length===1?'registro':'registros'}</div></div>
- {rows.length?<div className="record-list">{rows.map(row=><article className="record-row" key={row.id}><div className="record-icon"><Icon size={18}/></div><div className="record-main"><div className="record-title-line"><h3>{row.title||'Sem título'}</h3><Status value={row.status}/></div><p>{row.description||row.problem||row.objective||row.question||(row.stages?.length?`${row.stages.length} etapa(s) no projeto`:'Sem descrição registrada.')}</p><div className="record-meta"><span>{row.category||cfg.title}</span><span>·</span><span>Atualizado {dateText((row.updatedAt||row.createdAt||'').slice(0,10))}</span></div></div><div className="record-actions">{onConvert&&<button className="action-convert" onClick={()=>onConvert(row)}>{cfg.singular==='oportunidade'?'Transformar em ideia':'Criar projeto'} <ArrowRight size={14}/></button>}{onDuplicate&&<button className="icon-button" title="Duplicar ideia" onClick={()=>onDuplicate(row)}><Copy size={15}/></button>}<button className="icon-button" title="Editar" onClick={()=>onEdit(row)}><Settings size={16}/></button><button className="icon-button danger" title="Excluir" onClick={()=>onDelete(row)}><Trash2 size={16}/></button></div></article>)}</div>:query?<Empty icon={Search} title="Nenhum resultado" text="Tente outro termo de busca."/>:<Empty icon={Icon} title={`Ainda não há ${cfg.title.toLowerCase()}`} text={`Cadastre a primeira ${cfg.singular} para começar a organizar as informações.`} action={`Cadastrar ${cfg.singular}`} onAction={onNew}/>}
+ {rows.length?<div className="record-list">{rows.map(row=><article className="record-row" key={row.id}><div className="record-icon"><Icon size={18}/></div><div className="record-main"><div className="record-title-line"><h3><button type="button" className="record-title-button" onClick={()=>onView(row)}>{row.title||'Sem título'}</button></h3><Status value={row.status}/></div><p>{row.description||row.problem||row.objective||row.question||(row.stages?.length?`${row.stages.length} etapa(s) no projeto`:'Sem descrição registrada.')}</p><div className="record-meta"><span>{row.category||cfg.title}</span><span>·</span><span>Atualizado {dateText((row.updatedAt||row.createdAt||'').slice(0,10))}</span>{row.attachments?.length>0&&<><span>·</span><span className="attachment-count"><Paperclip size={12}/>{row.attachments.length}</span></>}</div></div><div className="record-actions">{onConvert&&<button className="action-convert" onClick={()=>onConvert(row)}>{cfg.singular==='oportunidade'?'Transformar em ideia':'Criar projeto'} <ArrowRight size={14}/></button>}{onDuplicate&&<button className="icon-button" title="Duplicar ideia" onClick={()=>onDuplicate(row)}><Copy size={15}/></button>}<button className="icon-button" title="Abrir registro" onClick={()=>onView(row)}><Eye size={16}/></button><button className="icon-button" title="Editar" onClick={()=>onEdit(row)}><Settings size={16}/></button><button className="icon-button danger" title="Excluir" onClick={()=>onDelete(row)}><Trash2 size={16}/></button></div></article>)}</div>:query?<Empty icon={Search} title="Nenhum resultado" text="Tente outro termo de busca."/>:<Empty icon={Icon} title={`Ainda não há ${cfg.title.toLowerCase()}`} text={`Cadastre a primeira ${cfg.singular} para começar a organizar as informações.`} action={`Cadastrar ${cfg.singular}`} onAction={onNew}/>}
  </section></>
 }
 function Status({value}){if(!value)return null;const cls=value==='Aprovada'||value==='Concluído'?'green':value==='Em análise'||value==='Planejamento'?'amber':value==='Arquivada'||value==='Cancelado'||value==='Rejeitada'?'gray':'blue';return <span className={`status ${cls}`}><i/>{value}</span>}
 function RecordModal({config:cfg,record,onClose,onSave}) {
- const [form,setForm]=useState(record);const [saving,setSaving]=useState(false)
- async function submit(e){e.preventDefault();setSaving(true);try{await onSave(form)}finally{setSaving(false)}}
- return <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&onClose()}><form className="record-modal" onSubmit={submit}><div className="modal-head"><div><div className="eyebrow">{record.id?'EDITAR REGISTRO':'NOVO REGISTRO'}</div><h2>{record.id?'Editar':'Cadastrar'} {cfg.singular}</h2></div><button type="button" className="icon-button" onClick={onClose}><X size={20}/></button></div><div className="modal-fields">{cfg.fields.map(([key,label,type,required,options])=><label className={type==='textarea'?'wide':''} key={key}>{label}{required&&<em> *</em>}{type==='textarea'?<textarea rows="3" required={required} value={form[key]||''} onChange={e=>setForm({...form,[key]:e.target.value})}/>:type==='select'?<select required={required} value={form[key]||''} onChange={e=>setForm({...form,[key]:e.target.value})}><option value="">Selecionar...</option>{options.map(o=><option key={o}>{o}</option>)}</select>:<input type={type} required={required} value={form[key]||''} onChange={e=>setForm({...form,[key]:e.target.value})}/>}</label>)}{cfg.title==='Projetos'&&<StageEditor stages={form.stages||[]} onChange={stages=>setForm({...form,stages})}/>}</div><div className="modal-foot"><span>Campos com * são obrigatórios</span><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={saving}><Check size={16}/>{saving?'Salvando...':'Salvar registro'}</button></div></form></div>
+ const [form,setForm]=useState(record);const [saving,setSaving]=useState(false);const [pendingFiles,setPendingFiles]=useState([]);const [error,setError]=useState('')
+ const originalAttachments=record.attachments||[]
+ const removedAttachments=originalAttachments.filter(file=>!(form.attachments||[]).some(item=>item.path===file.path))
+ async function submit(e){e.preventDefault();setSaving(true);setError('');try{await onSave(form,pendingFiles,removedAttachments)}catch(err){setError(err.message||'Não foi possível salvar o registro.')}finally{setSaving(false)}}
+ function stageFiles(list){const files=Array.from(list||[]);const oversized=files.find(file=>file.size>MAX_ATTACHMENT_SIZE);if(oversized){setError(`“${oversized.name}” excede o limite de 50 MB.`);return}setPendingFiles(current=>[...current,...files]);setError('')}
+ return <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&onClose()}><form className="record-modal" onSubmit={submit}><div className="modal-head"><div><div className="eyebrow">{record.id?'EDITAR REGISTRO':'NOVO REGISTRO'}</div><h2>{record.id?'Editar':'Cadastrar'} {cfg.singular}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Fechar"><X size={20}/></button></div><div className="modal-fields">{cfg.fields.map(([key,label,type,required,options])=><label className={type==='textarea'?'wide':''} key={key}>{label}{required&&<em> *</em>}{type==='textarea'?<textarea rows="3" required={required} value={form[key]||''} onChange={e=>setForm({...form,[key]:e.target.value})}/>:type==='select'?<select required={required} value={form[key]||''} onChange={e=>setForm({...form,[key]:e.target.value})}><option value="">Selecionar...</option>{options.map(o=><option key={o}>{o}</option>)}</select>:<input type={type} required={required} value={form[key]||''} onChange={e=>setForm({...form,[key]:e.target.value})}/>}</label>)}
+ <section className="attachment-editor wide"><div className="attachment-editor-head"><div><b>Anexos</b><small>Até 50 MB por arquivo. Imagens e PDFs aparecem no registro; outros arquivos podem ser baixados.</small></div><label className="secondary-button file-button"><Upload size={15}/> Anexar arquivos<input type="file" multiple onChange={e=>{stageFiles(e.target.files);e.target.value=''}}/></label></div>
+ {(form.attachments||[]).length>0&&<div className="attachment-pending-list">{form.attachments.map(file=><div className="attachment-pending" key={file.path}><File size={15}/><span>{file.name}</span><button type="button" className="icon-button danger" aria-label={`Remover ${file.name}`} onClick={()=>setForm({...form,attachments:form.attachments.filter(item=>item.path!==file.path)})}><X size={14}/></button></div>)}</div>}
+ {pendingFiles.map((file,index)=><div className="attachment-pending" key={`${file.name}-${file.size}-${file.lastModified}-${index}`}><File size={15}/><span>{file.name} · {formatBytes(file.size)} · aguardando salvar</span><button type="button" className="icon-button danger" aria-label={`Remover ${file.name}`} onClick={()=>setPendingFiles(pendingFiles.filter((_,i)=>i!==index))}><X size={14}/></button></div>)}
+ {error&&<p className="attachment-error" role="alert">{error}</p>}</section>
+ {cfg.title==='Projetos'&&<StageEditor stages={form.stages||[]} onChange={stages=>setForm({...form,stages})}/>}</div><div className="modal-foot"><span>Campos com * são obrigatórios</span><button type="button" className="secondary-button" onClick={onClose}>Cancelar</button><button className="primary-button" disabled={saving}><Check size={16}/>{saving?'Salvando...':'Salvar registro'}</button></div></form></div>
 }
+
+function RecordDetails({config:cfg,record,onClose,onEdit}) {
+ const fields=cfg.fields.filter(([key])=>!['title','status'].includes(key)).map(([key,label])=>({key,label,value:record[key]})).filter(field=>field.value)
+ return <div className="modal-backdrop" onMouseDown={e=>e.target===e.currentTarget&&onClose()}><section className="record-modal detail-modal"><div className="modal-head"><div><div className="eyebrow">{cfg.singular.toUpperCase()}</div><h2>{record.title||'Sem título'}</h2></div><button type="button" className="icon-button" onClick={onClose} aria-label="Fechar"><X size={20}/></button></div><div className="detail-content">{record.status&&<div className="detail-status"><Status value={record.status}/></div>}{fields.length>0&&<div className="detail-fields">{fields.map(field=><div className="detail-field" key={field.key}><b>{field.label}</b><p>{field.value}</p></div>)}</div>}{record.stages?.length>0&&<section className="detail-section"><h3>Etapas do projeto</h3><div className="detail-stages">{record.stages.map((stage,index)=><div className="detail-stage" key={stage.id||index}><b>{stage.name||`Etapa ${index+1}`}</b><span>{stage.status}{stage.date?` · ${dateText(stage.date)}`:''}</span>{stage.description&&<p>{stage.description}</p>}</div>)}</div></section>}<AttachmentGallery attachments={record.attachments||[]}/></div><div className="modal-foot"><span>Atualizado {dateText((record.updatedAt||record.createdAt||'').slice(0,10))}</span><button type="button" className="secondary-button" onClick={onClose}>Fechar</button><button type="button" className="primary-button" onClick={onEdit}><Settings size={15}/> Editar</button></div></section></div>
+}
+
+function AttachmentGallery({attachments}) {
+ return <section className="detail-section attachment-gallery"><div className="attachment-gallery-head"><div><h3>Anexos</h3><p>{attachments.length?`${attachments.length} arquivo(s) neste registro`:'Nenhum anexo neste registro'}</p></div></div>{attachments.length>0&&<div className="attachment-grid">{attachments.map(file=><AttachmentPreview key={file.path} file={file}/>)}</div>}</section>
+}
+
+function AttachmentPreview({file}) {
+ const [url,setUrl]=useState('');const [error,setError]=useState('')
+ const isImage=file.type?.startsWith('image/')||/\.(png|jpe?g|gif|webp|bmp|svg|avif)$/i.test(file.name)
+ const isPdf=file.type==='application/pdf'||/\.pdf$/i.test(file.name)
+ useEffect(()=>{let active=true;attachmentUrl(file.path).then(value=>{if(active)setUrl(value)}).catch(err=>{if(active)setError(err.message||'Não foi possível abrir o anexo.')});return()=>{active=false}},[file.path])
+ async function downloadFile(){try{const signed=await attachmentUrl(file.path,true);const link=document.createElement('a');link.href=signed;link.rel='noreferrer';link.click()}catch(err){setError(err.message||'Não foi possível baixar o anexo.')}}
+ return <article className="attachment-card"><div className="attachment-card-head"><div className="attachment-file-icon">{isImage?<Eye size={16}/>:isPdf?<FileSearch size={16}/>:<File size={16}/>}</div><div className="attachment-file-name"><b title={file.name}>{file.name}</b><small>{formatBytes(file.size)}</small></div><button type="button" className="icon-button" title="Baixar arquivo" onClick={downloadFile}><Download size={16}/></button></div>{error?<p className="attachment-error">{error}</p>:isImage?<div className="attachment-image-wrap">{url?<img src={url} alt={file.name}/>:<span>Carregando imagem…</span>}</div>:isPdf?<div className="attachment-pdf-wrap">{url?<iframe src={url} title={`Prévia: ${file.name}`}/>:<span>Carregando PDF…</span>}</div>:<p className="attachment-download-note">Este formato precisa ser baixado para abrir.</p>}</article>
+}
+
+function formatBytes(size=0){if(size<1024)return `${size} B`;if(size<1024*1024)return `${(size/1024).toFixed(1)} KB`;return `${(size/(1024*1024)).toFixed(1)} MB`}
 
 const conclusionFields=[['favorable','Pontos favoráveis'],['difficulties','Dificuldades'],['resources','Recursos necessários'],['risks','Riscos'],['unknowns','Informações desconhecidas'],['alternatives','Alternativas mais simples'],['nextAction','Próxima ação recomendada']]
 const criteria=[['institutional','Relevância institucional'],['workers','Benefício para trabalhadores'],['businesses','Benefício para empresas do setor'],['cost','Adequação do custo estimado'],['complexity','Simplicidade técnica e operacional'],['time','Adequação do prazo'],['team','Disponibilidade de equipe'],['partners','Disponibilidade de parceiros'],['external','Baixa dependência externa'],['information','Disponibilidade de informações'],['legal','Risco jurídico controlável'],['operation','Risco operacional controlável'],['outcome','Potencial de resultado'],['individual','Execução individual com apoio de IA'],['mvp','Possibilidade de começar com MVP']]
