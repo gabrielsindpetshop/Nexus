@@ -6,7 +6,7 @@ Aplicação web para organizar oportunidades, ideias, avaliações, projetos, pe
 
 1. Instale Node.js 20+ e o Supabase CLI.
 2. Copie `.env.example` para `.env.local`.
-3. Preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_PUBLISHABLE_KEY` com os valores do seu projeto Supabase.
+3. Preencha `VITE_SUPABASE_URL` e `VITE_SUPABASE_PUBLISHABLE_KEY` com os valores do seu projeto Supabase. Para projetos que já usam `VITE_SUPABASE_ANON_KEY`, o app também aceita esse nome legado.
 4. Instale e execute o app:
 
 ```bash
@@ -52,3 +52,4 @@ Variáveis `VITE_*` são incorporadas no frontend durante o build; use nelas som
 npm run build
 npm run preview
 ```
+
